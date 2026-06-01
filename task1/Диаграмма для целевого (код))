@@ -1,0 +1,81 @@
+@startuml
+!theme plain
+skinparam componentStyle rectangle
+skinparam backgroundColor #FEFEFE
+title Целевая концептуальная архитектура AdScale (12 месяцев)
+
+' ==================== АКТЁРЫ И ВНЕШНИЕ СИСТЕМЫ ====================
+actor "Рекламодатель" as Advertiser #LightGray
+actor "Пользователь (сайт/приложение)" as EndUser #LightGray
+rectangle "DSP-партнёр\n(OpenRTB)" as DSP #LightCyan
+rectangle "Платёжный шлюз" as PaymentGateway #LightCyan
+
+' ==================== API GATEWAY ====================
+rectangle "API Gateway\n(Kong / Nginx)\n[аутентификация, rate limiting]" as Gateway #LightGreen
+
+' ==================== МИКРОСЕРВИСЫ ====================
+package "AdScale Platform" #LightBlue {
+    
+    rectangle "Bidding Service\n(Go)\nПриём bid requests, ранжирование" as Bidding #LightGreen
+    rectangle "Auction Engine\n(C++)\nВзвешивание, победитель" as Auction #LightGreen
+    rectangle "Delivery Service\n(Node.js)\nГенерация баннера" as Delivery #LightGreen
+    rectangle "Stats Writer\n(Python)\nПриём кликов/показов" as StatsWriter #LightGreen
+    rectangle "Campaign Service\n(Go)\nCRUD кампаний, ставок" as Campaign #LightGreen
+    rectangle "Payment Service\n(Go)\nБалансы, списания" as Payment #LightGreen
+    rectangle "Analytics Service\n(Python)\nАгрегаты, отчёты" as Analytics #LightGreen
+}
+
+' ==================== ХРАНИЛИЩА ====================
+database "Redis Cluster\n(кэш: ставки, кампании)" as Redis #LightYellow
+database "PostgreSQL OLTP\n(кампании, финансы)" as PostgresOLTP #LightYellow
+database "Kafka\n(очередь событий)" as Kafka #LightYellow
+database "ClickHouse\n(события, аналитика)" as ClickHouse #LightYellow
+database "PostgreSQL Reporting\n(read replica)" as PostgresRO #LightYellow
+
+' ==================== ВНЕШНИЕ СВЯЗИ ====================
+DSP --> Gateway : "Bid requests/responses\n(HTTPS / OpenRTB)"
+EndUser --> Delivery : "Показы / клики\n(HTTPS)"
+Advertiser --> Gateway : "Управление кампаниями\n(HTTPS)"
+Gateway --> PaymentGateway : "Пополнение бюджета\n(HTTPS)"
+
+' ==================== МАРШРУТИЗАЦИЯ ====================
+Gateway --> Bidding : "/bid"
+Gateway --> Campaign : "/campaigns"
+Gateway --> Analytics : "/reports"
+Gateway --> Payment : "/payments"
+
+' ==================== АУКЦИОННЫЙ ТРАКТ (CRITICAL PATH) ====================
+Bidding --> Auction : "Кандидаты\n(gRPC)"
+Auction --> Delivery : "Победитель\n(gRPC)"
+
+Bidding --> Redis : "Чтение кампаний"
+Auction --> Redis : "Чтение ставок"
+
+' ==================== ЗАПИСЬ СОБЫТИЙ (АСИНХРОННО) ====================
+Delivery --> StatsWriter : "Показ/клик\n(HTTP)"
+StatsWriter --> Kafka : "Публикация событий"
+Kafka --> ClickHouse : "Потоковое потребление"
+Kafka --> Analytics : "Потребление для real-time"
+
+' ==================== УПРАВЛЕНИЕ И ОТЧЁТЫ ====================
+Campaign --> PostgresOLTP : "Чтение/запись"
+Payment --> PostgresOLTP : "Балансы"
+Analytics --> PostgresRO : "Чтение агрегатов"
+ClickHouse --> Analytics : "Глубокий анализ"
+Analytics --> Gateway : "Отчёты"
+
+' ==================== ЛЕГЕНДА ====================
+legend right
+  <#LightGreen> Зелёным выделены новые / изменённые компоненты
+  <#LightYellow> Жёлтым – хранилища данных
+  <#LightCyan> Голубым – внешние системы
+  <#LightGray> Серым – пользователи
+  
+  **Устранённые проблемы:**
+  – Нет единой БД (PostgreSQL больше не SPoF)
+  – Нет синхронной записи в hot path (через Kafka)
+  – Кэширование (Redis) разгружает БД
+  – Горизонтальное масштабирование (K8s)
+endlegend
+
+@enduml
